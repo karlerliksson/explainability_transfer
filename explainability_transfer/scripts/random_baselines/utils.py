@@ -1,0 +1,171 @@
+import json
+import os
+import ast
+from typing import Callable, Dict, Iterable, List, Tuple, Union
+import re
+
+from filelock import FileLock
+from rouge_score import rouge_scorer, scoring
+from sacrebleu import corpus_bleu
+
+try:
+    import nltk
+    nltk.data.path.append('/.cache')
+
+    NLTK_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    NLTK_AVAILABLE = False
+
+if NLTK_AVAILABLE:
+    with FileLock(".lock") as lock:
+        nltk.download("punkt", quiet=True, download_dir='/.cache')
+
+
+def add_newline_to_end_of_each_sentence(x: str) -> str:
+    """This was added to get rougeLsum scores matching published rougeL scores for BART and PEGASUS."""
+    re.sub("<n>", "", x)  # remove pegasus newline char
+    assert NLTK_AVAILABLE, "nltk must be installed to separate newlines between sentences. (pip install nltk)"
+    return "\n".join(nltk.sent_tokenize(x))
+
+def parse_pseudo_json(x, quotation_fix=False):
+    ind_stop = x.find('explanations') - 3
+    ind_start = ind_stop + 18
+    ind_stop2 = x.find(", 'explanations_all'") if "explanations_all" in x else x.find('}')
+    if quotation_fix:
+        expl = ast.literal_eval(x[ind_start:ind_stop2].replace("\n"," ").replace('" ','"').replace(' "', '"'))
+    else:
+        expl = ast.literal_eval(x[ind_start:ind_stop2].replace("\n"," "))#.replace('" ','"').replace(' "', '"'))
+    x = x[:ind_stop] + "}"
+    x = x.replace("(","[").replace(")","]").replace("'", '"')
+    d = json.loads(x)
+    d["overlap_spans"] = [tuple(x) for x in d["overlap_spans"]]
+    d["explanations"] = expl
+    return d
+
+def load_data(eval_task, eval_dir, checkpoint, quotation_fix=False):
+    inputs_file = "{}_inputs".format(eval_task)
+    targets_file = "{}_targets".format(eval_task)
+    predictions_file = "{}_{}_predictions".format(eval_task, checkpoint)
+    
+    with open(os.path.join(eval_dir, inputs_file)) as f:
+        if quotation_fix:
+            inputs = [ast.literal_eval(line).decode('utf-8').replace("\n", " ").replace('" ','"').replace(' "', '"') for line in f]
+        else:
+            inputs = [ast.literal_eval(line).decode('utf-8').replace("\n", " ") for line in f]#.replace('" ','"').replace(' "', '"') for line in f]
+
+    with open(os.path.join(eval_dir, targets_file), 'rb') as f:
+        targets = [parse_pseudo_json(line.decode('utf-8'), quotation_fix=quotation_fix) for line in f]
+
+    with open(os.path.join(eval_dir, predictions_file), 'rb') as f:
+        predictions = [parse_pseudo_json(line.decode('utf-8'), quotation_fix=quotation_fix) for line in f]
+        
+    # Check so that all explanations in target in fact are also in the input
+    for ind, (t, i) in enumerate(zip(targets, inputs)):
+        for exp in t['explanations']:
+            if exp not in i:
+                print(ind)
+                print(exp)
+                print(i)
+                print("----")
+                
+    # Check so that all explanations in prediction in fact are also in the input
+    for ind, (p, i) in enumerate(zip(predictions, inputs)):
+        for exp in p['explanations']:
+            if exp not in i:
+                print(ind)
+                print(exp)
+                print(i)
+                print("----")
+    
+    return inputs, targets, predictions
+
+def find_ind(x, inputs):
+    for ind, i in enumerate(inputs):
+        if x == i:
+            return ind
+    return -1
+            
+def visualize_explanation(ind, i, t, p):
+    expl_p = set(p['explanations'])
+    expl_t = set(t['explanations'])
+    expl_only_p = []
+    expl_only_t = []
+    expl_both = []
+    for e_p in expl_p:
+        if e_p not in expl_t:
+            expl_only_p.append(e_p)
+        else:
+            expl_both.append(e_p)
+    for e_t in expl_t:
+        if e_t not in expl_p:
+            expl_only_t.append(e_t)
+
+    formatted_text = i
+    for e in expl_both:
+        formatted_text = formatted_text.replace(e, '\x1b[1;32m'+e+'\x1b[0m')
+    for e in expl_only_p:
+        formatted_text = formatted_text.replace(e, '\x1b[1;31m'+e+'\x1b[0m')
+    for e in expl_only_t:
+        formatted_text = formatted_text.replace(e, '\x1b[1;33m'+e+'\x1b[0m')
+    print("\nEvaluation sample: {}".format(ind))
+    print("Target label: {}".format(t['label']))
+    if p['label'] == t['label']:
+        pred_label = '\x1b[1;32m'+p['label']+'\x1b[0m'
+    else:
+        pred_label = '\x1b[1;31m'+p['label']+'\x1b[0m'
+    print("Predicted label: {}\n".format(pred_label))
+    print(formatted_text)
+    print("\n==================================================")
+    
+ROUGE_KEYS = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+
+def calculate_rouge(
+    pred_lns: List[str],
+    tgt_lns: List[str],
+    use_stemmer=True,
+    rouge_keys=ROUGE_KEYS,
+    return_precision_and_recall=False,
+    bootstrap_aggregation=True,
+    newline_sep=True,
+) -> Dict:
+    """Calculate rouge using rouge_scorer package.
+
+    Args:
+        pred_lns: list of summaries generated by model
+        tgt_lns: list of groundtruth summaries (e.g. contents of val.target)
+        use_stemmer:  Bool indicating whether Porter stemmer should be used to
+        strip word suffixes to improve matching.
+        rouge_keys:  which metrics to compute, defaults to rouge1, rouge2, rougeL, rougeLsum
+        return_precision_and_recall: (False) whether to also return precision and recall.
+        bootstrap_aggregation: whether to do the typical bootstrap resampling of scores. Defaults to True, if False
+            this function returns a collections.defaultdict[metric: list of values for each observation for each subscore]``
+        newline_sep:(default=True) whether to add newline between sentences. This is essential for calculation rougeL
+        on multi sentence summaries (CNN/DM dataset).
+
+    Returns:
+         Dict[score: value] if aggregate else defaultdict(list) keyed by rouge_keys
+
+    """
+    scorer = rouge_scorer.RougeScorer(rouge_keys, use_stemmer=use_stemmer)
+    aggregator = scoring.BootstrapAggregator()
+    for pred, tgt in zip(tgt_lns, pred_lns):
+        # rougeLsum expects "\n" separated sentences within a summary
+        if newline_sep:
+            pred = add_newline_to_end_of_each_sentence(pred)
+            tgt = add_newline_to_end_of_each_sentence(tgt)
+        scores = scorer.score(pred, tgt)
+        aggregator.add_scores(scores)
+
+    if bootstrap_aggregation:
+        result = aggregator.aggregate()
+        if return_precision_and_recall:
+            return extract_rouge_mid_statistics(result)  # here we return dict
+        else:
+            return {k: round(v.mid.fmeasure * 100, 4) for k, v in result.items()}
+
+    else:
+        return aggregator._scores  # here we return defaultdict(list)
+
+def calculate_bleu(output_lns, refs_lns, **kwargs) -> dict:
+    """Uses sacrebleu's corpus_bleu implementation."""
+    return {"bleu": round(corpus_bleu(output_lns, [refs_lns], **kwargs).score, 4)}
