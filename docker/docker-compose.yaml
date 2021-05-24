@@ -1,0 +1,57 @@
+version: '2.3'
+services:
+  repl:
+    image: explainability_transfer
+    command: /bin/bash
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        - USER_ID=${USER_ID}
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    user: ${USER_ID}:${USER_ID}
+    runtime: ${RUNTIME}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_IDS}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ${PROJECT_DIR}/explainability_transfer:/workspace/explainability_transfer
+      - ${PROJECT_DIR}/datasets:/workspace/datasets
+      - ${PROJECT_DIR}/text-to-text-transfer-transformer:/workspace/text-to-text-transfer-transformer
+      - ${DATA_DIR}:/workspace/data
+      - ${DATA_DIR}/tensorflow_datasets:/tensorflow_datasets
+      - ${MODEL_DIR}:/workspace/models
+    
+  jupyter:
+    image: explainability_transfer
+    command: jupyter lab --ip=0.0.0.0 --no-browser --NotebookApp.token='${JUPYTER_PW}'
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        - USER_ID=${USER_ID}
+    shm_size: '16gb'
+    ports:
+      - ${JUPYTER_PORT}:8888
+    user: ${USER_ID}:${USER_ID}
+    runtime: ${RUNTIME}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_IDS}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ${PROJECT_DIR}/explainability_transfer:/workspace/explainability_transfer
+      - ${PROJECT_DIR}/datasets:/workspace/datasets
+      - ${PROJECT_DIR}/text-to-text-transfer-transformer:/workspace/text-to-text-transfer-transformer
+      - ${DATA_DIR}:/workspace/data
+      - ${DATA_DIR}/tensorflow_datasets:/tensorflow_datasets
+      - ${MODEL_DIR}:/workspace/models
+
+  tensorboard:
+    image: activeeon/tensorboard
+    command: tensorboard --logdir /workspace/tensorboard_logs
+    ports:
+      - ${TENSORBOARD_PORT}:6006
+    volumes:
+      - ${MODEL_DIR}:/workspace/tensorboard_logs

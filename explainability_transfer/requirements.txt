@@ -1,0 +1,15 @@
+spacy==2.3.5
+tensorflow-text==2.3.0
+torch==1.7.1
+transformers==3.4.0
+ipywidgets==7.6.3
+jupyterlab==3.0.5
+scikit-learn==0.24.1
+pytorch-lightning==1.0.4
+gitpython==3.1.12
+pandas==1.1.5
+matplotlib==3.3.3
+seaborn==0.11.1
+sentence-splitter==1.4
+sacrebleu==1.5.0
+rouge-score==0.0.4
